@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Upload, Download, Copy, Loader2, AlertCircle, Settings } from 'lucide-react';
+import { Upload, Download, Copy, Loader2, AlertCircle, Settings, X } from 'lucide-react';
 
 // Price table matching Excel
 const PRICE_TABLE = {
@@ -106,10 +106,164 @@ function App() {
     return 0;
   };
 
+// Consolidate multi-page BOLs
+const consolidateMultiPageBOLs = (processedResults) => {
+  const grouped = {};
+
+  processedResults.forEach(result => {
+    // Extract base PRO (remove suffixes like -1A, -1B, etc.)
+    const basePro = result.pro.replace(/[-_\s]?\d*[A-Z]$/i, '').trim();
+    
+    // Normalize delivery address for comparison (remove extra spaces, lowercase)
+    const normalizedAddress = (result.deliveryAddress || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    
+    // Create grouping key using driver, base PRO, AND delivery address
+    // This ensures BOLs are only combined if they're:
+    // 1. Same driver
+    // 2. Same base PRO number (or consecutive pages like 1A, 1B)
+    // 3. Same delivery address
+    const groupKey = `${result.driver}|${basePro}|${normalizedAddress}`;
+    
+    if (!grouped[groupKey]) {
+      // First page of this delivery - initialize
+      grouped[groupKey] = {
+        ...result,
+        pages: [result],
+        isMultiPage: false,
+        originalPro: result.pro,
+        hasDebrisSection: result.hasDebrisSection,
+        isLakeshore: result.isLakeshore,
+      };
+    } else {
+      // Subsequent page - mark as multi-page and aggregate
+      grouped[groupKey].isMultiPage = true;
+      grouped[groupKey].pages.push(result);
+      
+      // Aggregate numerical values
+      grouped[groupKey].weight = (grouped[groupKey].weight || 0) + (result.weight || 0);
+      grouped[groupKey].volumeFt3 = (grouped[groupKey].volumeFt3 || 0) + (result.volumeFt3 || 0);
+      
+      // Keep the most restrictive over length
+      if (result.overLength && result.overLength !== "") {
+        const ranges = ["97-144", "145-192", "193-240", "241 or more"];
+        const currentIndex = ranges.indexOf(grouped[groupKey].overLength || "");
+        const newIndex = ranges.indexOf(result.overLength);
+        if (currentIndex === -1 || newIndex > currentIndex) {
+          grouped[groupKey].overLength = result.overLength;
+        }
+      }
+      
+      // Combine pallet counts
+      grouped[groupKey].palletCount = (grouped[groupKey].palletCount || 0) + (result.palletCount || 0);
+      
+      // Keep "Yes" for any accessorial if any page has it
+      if (result.liftgate === "Yes") grouped[groupKey].liftgate = "Yes";
+      if (result.inside === "Yes") grouped[groupKey].inside = "Yes";
+      if (result.residential === "Yes") grouped[groupKey].residential = "Yes";
+      
+      // Keep debris section if any page has it
+      if (result.hasDebrisSection) grouped[groupKey].hasDebrisSection = true;
+      if (result.isLakeshore) grouped[groupKey].isLakeshore = true;
+      
+      // Keep most restrictive time specific
+      if (result.timeSpecific && result.timeSpecific !== "") {
+        if (!grouped[groupKey].timeSpecific || grouped[groupKey].timeSpecific === "") {
+          grouped[groupKey].timeSpecific = result.timeSpecific;
+        } else if (result.timeSpecific === "15 Minutes") {
+          grouped[groupKey].timeSpecific = "15 Minutes";
+        } else if (result.timeSpecific === "AM Special" && grouped[groupKey].timeSpecific !== "15 Minutes") {
+          grouped[groupKey].timeSpecific = "AM Special";
+        }
+      }
+      
+      // Sum detention
+      grouped[groupKey].detention = (grouped[groupKey].detention || 0) + (result.detention || 0);
+    }
+  });
+
+  // Recalculate charges for all results (both single and multi-page)
+  return Object.values(grouped).map(group => {
+    const chargeableWeight = calculateChargeableWeight(group.volumeFt3);
+    const applicableWeight = Math.max(group.weight || 0, chargeableWeight);
+    
+    const freight = calculateFreight(group.zone, applicableWeight);
+    const fuelSurcharge = calculateFuelSurcharge(freight);
+    
+    const debrisRemoval = calculateDebrisRemoval(
+      group.palletCount,
+      group.hasDebrisSection,
+      group.isLakeshore
+    );
+    
+    const liftgate = group.liftgate === "Yes" ? 20 : 0;
+    const inside = calculateInsideDelivery(group.inside, applicableWeight);
+    const overLength = calculateOverLength(group.overLength);
+    const residential = group.residential === "Yes" ? 15 : 0;
+    const timeSpecific = calculateTimeSpecific(group.timeSpecific, group.zone);
+    const detention = calculateDetention(group.detention);
+    const extras = 0;
+    
+    let total = freight === 'Quote Required' ? 'Quote Required' :
+      freight + fuelSurcharge + debrisRemoval + liftgate + inside + 
+      (overLength === 'Quote' ? 0 : overLength) + residential + timeSpecific + detention + extras;
+
+    return {
+      pro: group.isMultiPage ? `${group.originalPro} (${group.pages.length}p)` : group.originalPro,
+      driver: group.driver,
+      zone: group.zone || '?',
+      weight: group.weight || 0,
+      volumeFt3: group.volumeFt3 || 0,
+      chargeable: applicableWeight.toFixed(2),
+      freight: freight === 'Quote Required' ? freight : `${freight.toFixed(2)}`,
+      fuelSurcharge: fuelSurcharge === 'Quote Required' ? fuelSurcharge : `${fuelSurcharge.toFixed(2)}`,
+      debrisRemoval: `${debrisRemoval.toFixed(2)}`,
+      liftgate: group.liftgate,
+      inside: group.inside,
+      overLength: group.overLength,
+      residential: group.residential,
+      timeSpecific: group.timeSpecific,
+      detention: group.detention || 0,
+      extras: `${extras.toFixed(2)}`,
+      total: total === 'Quote Required' ? total : `${total.toFixed(2)}`,
+    };
+  });
+};
+
+  // Handle file selection
+  const handleFileChange = (e) => {
+    const selectedFiles = Array.from(e.target.files);
+    const filesWithDrivers = selectedFiles.map(file => ({
+      file,
+      driverName: '' // Initialize with empty driver name
+    }));
+    setFiles(prevFiles => [...prevFiles, ...filesWithDrivers]);
+  };
+
+  // Update driver name for specific file
+  const updateDriverName = (index, name) => {
+    setFiles(prevFiles => {
+      const updated = [...prevFiles];
+      updated[index].driverName = name;
+      return updated;
+    });
+  };
+
+  // Remove file from list
+  const removeFile = (index) => {
+    setFiles(prevFiles => prevFiles.filter((_, i) => i !== index));
+  };
+
   // Process PDFs with Claude API
   const processPDFs = async () => {
     if (files.length === 0) {
       setError('Please upload at least one BOL PDF');
+      return;
+    }
+
+    // Check if all files have driver names
+    const missingDrivers = files.some(f => !f.driverName.trim());
+    if (missingDrivers) {
+      setError('Please enter a driver name for all uploaded files');
       return;
     }
 
@@ -120,8 +274,8 @@ function App() {
     try {
       const processedResults = [];
 
-      for (const file of files) {
-        const driverName = file.name.replace('.pdf', '').replace(/_/g, ' ');
+      for (const fileObj of files) {
+        const { file, driverName } = fileObj;
 
         const base64 = await new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -158,51 +312,23 @@ function App() {
 
             const extracted = JSON.parse(jsonMatch[0]);
 
-            // Calculate charges
-            const chargeableWeight = calculateChargeableWeight(extracted.volume);
-            const applicableWeight = Math.max(extracted.weight || 0, chargeableWeight);
-            
-            const freight = calculateFreight(extracted.zone, applicableWeight);
-            const fuelSurcharge = calculateFuelSurcharge(freight);
-            
-            // Image 2: Debris removal logic
-            const debrisRemoval = calculateDebrisRemoval(
-              extracted.palletCount, 
-              extracted.hasDebrisSection,
-              extracted.isLakeshore
-            );
-            
-            // Updated to use string values directly from Claude
-            const liftgate = extracted.liftgate === "Yes" ? 20 : 0;
-            const inside = calculateInsideDelivery(extracted.inside, applicableWeight);
-            const overLength = calculateOverLength(extracted.overLength);
-            const residential = extracted.residential === "Yes" ? 15 : 0;
-            const timeSpecific = calculateTimeSpecific(extracted.timeSpecific, extracted.zone);
-            const detention = calculateDetention(extracted.detention);
-            const extras = 0; // Placeholder for manual extras
-            
-            let total = freight === 'Quote Required' ? 'Quote Required' :
-              freight + fuelSurcharge + debrisRemoval + liftgate + inside + 
-              (overLength === 'Quote' ? 0 : overLength) + residential + timeSpecific + detention + extras;
-
+            // Store raw extracted data with all fields
             processedResults.push({
               pro: extracted.pro,
-              driver: driverName,
+              driver: driverName.trim(), // Use the user-provided driver name
               zone: extracted.zone || '?',
               weight: extracted.weight || 0,
               volumeFt3: extracted.volume || 0,
-              chargeable: applicableWeight.toFixed(2),
-              freight: freight === 'Quote Required' ? freight : `${freight.toFixed(2)}`,
-              fuelSurcharge: fuelSurcharge === 'Quote Required' ? fuelSurcharge : `${fuelSurcharge.toFixed(2)}`,
-              debrisRemoval: `${debrisRemoval.toFixed(2)}`,
-              liftgate: extracted.liftgate, // Now returns "Yes" or ""
-              inside: extracted.inside, // Now returns "Yes" or ""
-              overLength: extracted.overLength, // Now returns range string or ""
-              residential: extracted.residential, // Now returns "Yes" or ""
-              timeSpecific: extracted.timeSpecific, // Now returns "AM Special", "2 Hours", "15 Minutes", or ""
-              detention: extracted.detention || 0, // Number of minutes
-              extras: `${extras.toFixed(2)}`,
-              total: total === 'Quote Required' ? total : `${total.toFixed(2)}`,
+              liftgate: extracted.liftgate,
+              inside: extracted.inside,
+              overLength: extracted.overLength,
+              residential: extracted.residential,
+              timeSpecific: extracted.timeSpecific,
+              detention: extracted.detention || 0,
+              palletCount: extracted.palletCount || 0,
+              hasDebrisSection: extracted.hasDebrisSection || false,
+              isLakeshore: extracted.isLakeshore || false,
+              deliveryAddress: extracted.deliveryAddress || '',
             });
 
           } catch (error) {
@@ -217,7 +343,9 @@ function App() {
         }
       }
 
-      setResults(processedResults);
+      // Consolidate multi-page BOLs before setting results
+      const consolidatedResults = consolidateMultiPageBOLs(processedResults);
+      setResults(consolidatedResults);
 
     } catch (err) {
       setError(`Error processing PDFs: ${err.message}`);
@@ -324,19 +452,45 @@ function App() {
                 type="file"
                 multiple
                 accept=".pdf"
-                onChange={(e) => setFiles(Array.from(e.target.files))}
+                onChange={handleFileChange}
                 className="hidden"
               />
             </div>
           </label>
 
           {files.length > 0 && (
-            <div className="mt-4">
-              <p className="font-medium text-gray-700 mb-2">Selected Files ({files.length}):</p>
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                {files.map((file, i) => (
-                  <div key={i} className="text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded">
-                    {file.name}
+            <div className="mt-6">
+              <div className="flex justify-between items-center mb-3">
+                <p className="font-medium text-gray-700">Uploaded Files ({files.length}):</p>
+                <button
+                  onClick={() => setFiles([])}
+                  className="text-sm text-red-600 hover:text-red-700"
+                >
+                  Clear All
+                </button>
+              </div>
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {files.map((fileObj, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-gray-50 px-4 py-3 rounded-lg border border-gray-200">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-700 mb-2 truncate" title={fileObj.file.name}>
+                        📄 {fileObj.file.name}
+                      </p>
+                      <input
+                        type="text"
+                        placeholder="Enter driver name (e.g., John Smith)"
+                        value={fileObj.driverName}
+                        onChange={(e) => updateDriverName(i, e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      />
+                    </div>
+                    <button
+                      onClick={() => removeFile(i)}
+                      className="flex-shrink-0 p-2 hover:bg-red-100 rounded-lg transition-colors group"
+                      title="Remove this file"
+                    >
+                      <X className="w-5 h-5 text-gray-500 group-hover:text-red-600" />
+                    </button>
                   </div>
                 ))}
               </div>
@@ -346,15 +500,15 @@ function App() {
           <button
             onClick={processPDFs}
             disabled={loading || files.length === 0}
-            className="mt-4 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-medium py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
+            className="mt-6 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-medium py-3 px-6 rounded-lg transition-colors flex items-center justify-center gap-2"
           >
             {loading ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
-                Processing...
+                Processing {files.length} file{files.length !== 1 ? 's' : ''}...
               </>
             ) : (
-              'Extract & Calculate'
+              `Extract & Calculate (${files.length} file${files.length !== 1 ? 's' : ''})`
             )}
           </button>
         </div>

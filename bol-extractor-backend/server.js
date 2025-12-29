@@ -81,6 +81,8 @@ async function processPage(pageBase64, pageNumber) {
 
 1. PRO# (job number) - Look for "PRO#", "PRO NUMBER", or similar tracking number
    - This is the unique job identifier
+   - May have suffixes like "1A", "1B", "1C" for multi-page deliveries
+   - Extract the FULL PRO including any suffix (e.g., "12345-1A", "12345-1B")
 
 2. ZONE - Single letter (A-L) indicating delivery zone location
    - **CRITICAL**: Look in the "Deliver To" section on the RIGHT side
@@ -115,14 +117,16 @@ async function processPage(pageBase64, pageNumber) {
    - Return "Yes" or "" (empty string)
 
 8. OVER LENGTH - String with INCHES range or blank ""
-   - Look for dimension information in Length, Width, Height columns
-   - **CRITICAL**: Return in INCHES, not feet
+   - **CRITICAL**: Look for dimension information in Length, Width, Height columns
+   - **CRITICAL**: Return dimensions in INCHES, not feet
+   - **CRITICAL**: Only return a range if the LONGEST dimension is 97 inches or more
    - Return format: "97-144", "145-192", "193-240", "241 or more", or "" (empty string)
    - If longest dimension is 97-144 inches → "97-144"
    - If longest dimension is 145-192 inches → "145-192"
    - If longest dimension is 193-240 inches → "193-240"
    - If longest dimension is 241+ inches → "241 or more"
-   - If all dimensions under 97 inches → "" (empty string)
+   - **If longest dimension is UNDER 97 inches → "" (empty string)**
+   - If no dimensions found → "" (empty string)
 
 9. DEBRIS REMOVAL - Critical for Lakeshore clients
    - palletCount: Count of pallets/skids (pieces)
@@ -131,23 +135,48 @@ async function processPage(pageBase64, pageNumber) {
    - RULE: Every pallet costs $3 if EITHER debris section exists OR client is Lakeshore
 
 10. TIME SPECIFIC - String or blank ""
-    - Look for time-sensitive delivery requirements
-    - **CRITICAL**: Check for these indicators:
-      - Handwritten or circled "T.S" or "TS" (means Time Specific)
-      - "(DEL) APPOINTMENT DELIVERY Required"
-      - "APPOINTMENT DELIVERY"
-      - "AM DELIVERY", "AM SPECIAL"
-      - "2 HOUR WINDOW", "15 MINUTE WINDOW"
+    - **CRITICAL**: Look for "Req Del From:" and "To:" fields showing the delivery time window
+    - **If NO time window is specified** → "" (empty string)
+    - **If time window EXISTS, calculate the window type based on the times:**
+      
+      **AM Special**: If the END time (the "To:" time) is BEFORE 12:00 PM (noon)
+        - Examples: 
+          - "08:00 EST To: 11:00 EST" → AM Special (ends before noon)
+          - "09:00 EST To: 11:59 EST" → AM Special (ends before noon)
+          - "Dec 16 25 - 09:00 EST To: Dec 16 25 - 12:30 EST" → NOT AM Special (ends after noon)
+      
+      **15 Minutes**: If the time window is 15 minutes or less
+        - Examples:
+          - "10:00 EST To: 10:15 EST" → 15 Minutes
+          - "14:30 EST To: 14:45 EST" → 15 Minutes
+      
+      **2 Hours**: If the time window is present and doesn't match AM Special or 15 Minutes
+        - Examples:
+          - "09:00 EST To: 11:00 EST" → 2 Hours
+          - "13:00 EST To: 15:00 EST" → 2 Hours
+          - "Dec 16 25 - 09:00 EST To: Dec 16 25 - 12:30 EST" → 2 Hours
+      
+    - **Logic Priority:**
+      1. Check if "Req Del From:" and "To:" fields exist → If NO, return ""
+      2. If window is 15 minutes or less → "15 Minutes"
+      3. If END time is before 12:00 PM → "AM Special"
+      4. If time window specified but doesn't match above → "2 Hours"
+      5. If no time window found → "" (empty string)
+    
+    - **CRITICAL**: Only look at the "Req Del From:" section. If these fields don't exist or are blank, return empty string
+    - **IGNORE** handwritten "TS" or "T.S" markings
     - Return exactly one of: "AM Special", "2 Hours", "15 Minutes", or "" (empty string)
-    - If you see "T.S" or "APPOINTMENT DELIVERY" but no specific time window mentioned, return "2 Hours"
-    - AM Special = M-F 0500-1159
-    - 2 Hours = M-F 0500-2000 (2 hour time window)
-    - 15 Minutes = M-F 0500-2000 (15 minute time window)
 
 11. DETENTION - Number (minutes) or 0
     - Any detention/waiting time noted on BOL
     - Return total minutes waited as a number
     - If no detention, return 0 (not null)
+
+12. DELIVERY ADDRESS - String
+    - **NEW FIELD**: Extract the full delivery address (street, city, state, zip)
+    - This is used to group multi-page BOLs to the same location
+    - Return complete address from "Deliver To" or "Consignee" section
+    - Format: "Street, City, State ZIP"
 
 Return ONLY valid JSON in this exact format (no markdown, no backticks):
 {
@@ -163,29 +192,24 @@ Return ONLY valid JSON in this exact format (no markdown, no backticks):
   "hasDebrisSection": boolean,
   "isLakeshore": boolean,
   "timeSpecific": "AM Special" or "2 Hours" or "15 Minutes" or "",
-  "detention": number (minutes, 0 if none)
+  "detention": number (minutes, 0 if none),
+  "deliveryAddress": "string (full delivery address)"
 }
 
 **EXAMPLES:**
-- If delivery section shows "Zone: H" → return "H" (NOT the pickup zone)
-- If you see "Lakeshore" as shipper and 5 pallets → "palletCount": 5, "isLakeshore": true
-- If you see a "debris removal" checkbox marked → "hasDebrisSection": true
-- If handwritten "inside" or "I care" in notes → "inside": "Yes"
-- If no inside delivery mentioned → "inside": ""
-- If handwritten/circled "T.S" or "TS" anywhere on BOL → "timeSpecific": "2 Hours"
-- If "(DEL) APPOINTMENT DELIVERY Required" → "timeSpecific": "2 Hours"
-- If no time-specific requirements → "timeSpecific": ""
-- If longest dimension is 120 inches → "overLength": "97-144"
-- If longest dimension is 180 inches → "overLength": "145-192"
-- If longest dimension is 250 inches → "overLength": "241 or more"
-- If all dimensions under 97 inches → "overLength": ""
-- Volume shown as "44.44" in Volume-ft3 column → "volume": 44.44
-- If no volume shown → "volume": 0
-- If "Pallet" type with count of 1 → "palletCount": 1
-- If 45 minutes detention → "detention": 45
-- If no detention → "detention": 0
-- If liftgate checkbox marked → "liftgate": "Yes"
-- If no liftgate → "liftgate": ""`
+- Longest dimension is 94 inches → "overLength": ""
+- Longest dimension is 48 inches → "overLength": ""
+- Longest dimension is 120 inches → "overLength": "97-144"
+- Longest dimension is 180 inches → "overLength": "145-192"
+- Req Del From: 8:00 AM - 10:00 AM → "timeSpecific": "AM Special"
+- Req Del From: 8:00 AM - 11:59 AM → "timeSpecific": "AM Special"
+- Req Del From: 10:00 AM - 12:00 PM → "timeSpecific": "2 Hours"
+- Req Del From: 2:00 PM - 2:15 PM → "timeSpecific": "15 Minutes"
+- Req Del From: 1:00 PM - 3:00 PM → "timeSpecific": "2 Hours"
+- No time requirement → "timeSpecific": ""
+- PRO# shows "12345-1A" → "pro": "12345-1A"
+- PRO# shows "12345-1B" → "pro": "12345-1B"
+- Delivery to "123 Main St, Dallas, TX 75001" → "deliveryAddress": "123 Main St, Dallas, TX 75001"`
             },
           ],
         },
@@ -195,7 +219,7 @@ Return ONLY valid JSON in this exact format (no markdown, no backticks):
     const textContent = message.content.find((c) => c.type === 'text')?.text;
 
     // Add logging to see what Claude returns
-    console.log('  📝 Claude response:', textContent);
+    console.log('  🔍 Claude response:', textContent);
 
     return {
       pageNumber,
@@ -216,7 +240,7 @@ app.post('/api/process-bol', async (req, res) => {
       return res.status(400).json({ error: 'No PDF data provided' });
     }
 
-    console.log(`\n🔄 Processing: ${filename}`);
+    console.log(`\n📄 Processing: ${filename}`);
     
     const pages = await splitPdfPages(pdfBase64);
     
@@ -262,10 +286,11 @@ app.listen(PORT, () => {
   console.log(`🚀 Backend server running on http://localhost:${PORT}`);
   console.log(`📡 Health check: http://localhost:${PORT}/health`);
   console.log(`\n📋 Extraction includes:`);
-  console.log(`   ✓ PRO# and Zone`);
+  console.log(`   ✓ PRO# with suffix detection (1A, 1B, etc.)`);
+  console.log(`   ✓ Delivery address for consolidation`);
+  console.log(`   ✓ Over length (97+ inches only)`);
+  console.log(`   ✓ Time-specific from "Req Del From:" field`);
   console.log(`   ✓ Debris removal (Lakeshore special rule)`);
   console.log(`   ✓ Inside delivery (handwriting + additional info)`);
-  console.log(`   ✓ Over length (inch ranges)`);
-  console.log(`   ✓ Time-specific windows`);
   console.log(`   ✓ Detention tracking\n`);
 });
