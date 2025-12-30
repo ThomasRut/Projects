@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { Upload, Download, Copy, Loader2, AlertCircle, Settings, X } from 'lucide-react';
-//checking something
 // Price table matching Excel
 const PRICE_TABLE = {
   'A': { '10000+': 0.0121, '5000+': 0.0129, '2000+': 0.0137, '1000+': 0.0144, min: 18.00, max: 160.00 },
