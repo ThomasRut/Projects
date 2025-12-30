@@ -110,22 +110,87 @@ function App() {
 const consolidateMultiPageBOLs = (processedResults) => {
   const grouped = {};
 
+const normalizeAddress = (addr) => {
+  if (!addr) return '';
+  
+  let normalized = addr
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\./g, '')
+    .replace(/,/g, '')
+    .replace(/\brd\b/g, 'road')
+    .replace(/\bst\b/g, 'street')
+    .replace(/\bave\b/g, 'avenue')
+    .replace(/\bdr\b/g, 'drive')
+    .replace(/\bln\b/g, 'lane')
+    .replace(/\bblvd\b/g, 'boulevard')
+    .replace(/\bct\b/g, 'court')
+    .replace(/\bpkwy\b/g, 'parkway')
+    .replace(/\bpl\b/g, 'place')
+    .replace(/\bcir\b/g, 'circle')
+    .replace(/\bste\b/g, 'suite')
+    .replace(/\bapt\b/g, 'apartment')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  // CRITICAL: Remove directionals entirely for better matching
+  // This must come AFTER abbreviation expansion
+  normalized = normalized
+    .replace(/\bnortheast\b/g, '')
+    .replace(/\bnorthwest\b/g, '')
+    .replace(/\bsoutheast\b/g, '')
+    .replace(/\bsouthwest\b/g, '')
+    .replace(/\bnorth\b/g, '')
+    .replace(/\bsouth\b/g, '')
+    .replace(/\beast\b/g, '')
+    .replace(/\bwest\b/g, '')
+    .replace(/\bne\b/g, '')
+    .replace(/\bnw\b/g, '')
+    .replace(/\bse\b/g, '')
+    .replace(/\bsw\b/g, '')
+    .replace(/\bn\b/g, '')
+    .replace(/\bs\b/g, '')
+    .replace(/\be\b/g, '')
+    .replace(/\bw\b/g, '')
+    .replace(/\s+/g, ' ')  // Clean up extra spaces created by removals
+    .trim();
+  
+  return normalized;
+};
+
+      // ADD THIS DEBUG CODE HERE:
+console.log('=== CONSOLIDATION DEBUG ===');
+processedResults.forEach((r, i) => {
+  const normalized = normalizeAddress(r.deliveryAddress);
+  console.log(`${i + 1}. PRO: ${r.pro}`);
+  console.log(`   Original: "${r.deliveryAddress}"`);
+  console.log(`   Normalized: "${normalized}"`);
+  console.log('');
+});
+console.log('=========================');
+
   processedResults.forEach(result => {
-    // Extract base PRO (remove suffixes like -1A, -1B, etc.)
-    const basePro = result.pro.replace(/[-_\s]?\d*[A-Z]$/i, '').trim();
+    const normalizedAddress = normalizeAddress(result.deliveryAddress);
     
-    // Normalize delivery address for comparison (remove extra spaces, lowercase)
-    const normalizedAddress = (result.deliveryAddress || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    // CRITICAL: Group ONLY by normalized delivery address
+    const groupKey = normalizedAddress;
     
-    // Create grouping key using driver, base PRO, AND delivery address
-    // This ensures BOLs are only combined if they're:
-    // 1. Same driver
-    // 2. Same base PRO number (or consecutive pages like 1A, 1B)
-    // 3. Same delivery address
-    const groupKey = `${result.driver}|${basePro}|${normalizedAddress}`;
+    if (!groupKey || groupKey === '') {
+      // If no address, treat as individual entry (don't group)
+      const uniqueKey = `${result.pro}-${Math.random()}`;
+      grouped[uniqueKey] = {
+        ...result,
+        pages: [result],
+        isMultiPage: false,
+        originalPro: result.pro,
+        hasDebrisSection: result.hasDebrisSection,
+        isLakeshore: result.isLakeshore,
+      };
+      return;
+    }
     
     if (!grouped[groupKey]) {
-      // First page of this delivery - initialize
+      // First page to this address - initialize
       grouped[groupKey] = {
         ...result,
         pages: [result],
@@ -135,7 +200,7 @@ const consolidateMultiPageBOLs = (processedResults) => {
         isLakeshore: result.isLakeshore,
       };
     } else {
-      // Subsequent page - mark as multi-page and aggregate
+      // Another page to the SAME address - mark as multi-page and aggregate
       grouped[groupKey].isMultiPage = true;
       grouped[groupKey].pages.push(result);
       
@@ -165,7 +230,7 @@ const consolidateMultiPageBOLs = (processedResults) => {
       if (result.hasDebrisSection) grouped[groupKey].hasDebrisSection = true;
       if (result.isLakeshore) grouped[groupKey].isLakeshore = true;
       
-      // Keep most restrictive time specific
+      // Keep most restrictive time specific (15 Minutes > AM Special > 2 Hours)
       if (result.timeSpecific && result.timeSpecific !== "") {
         if (!grouped[groupKey].timeSpecific || grouped[groupKey].timeSpecific === "") {
           grouped[groupKey].timeSpecific = result.timeSpecific;
@@ -178,6 +243,15 @@ const consolidateMultiPageBOLs = (processedResults) => {
       
       // Sum detention
       grouped[groupKey].detention = (grouped[groupKey].detention || 0) + (result.detention || 0);
+      
+      // Update PRO# to show it's a multi-page delivery
+      if (grouped[groupKey].pages.length === 2) {
+        // First time we're combining - add page count to first PRO
+        grouped[groupKey].originalPro = `${grouped[groupKey].originalPro} + ${result.pro}`;
+      } else {
+        // Already multi-page - just add the new PRO
+        grouped[groupKey].originalPro = `${grouped[groupKey].originalPro} + ${result.pro}`;
+      }
     }
   });
 
@@ -208,7 +282,7 @@ const consolidateMultiPageBOLs = (processedResults) => {
       (overLength === 'Quote' ? 0 : overLength) + residential + timeSpecific + detention + extras;
 
     return {
-      pro: group.isMultiPage ? `${group.originalPro} (${group.pages.length}p)` : group.originalPro,
+      pro: group.isMultiPage ? `${group.originalPro}` : group.originalPro,
       driver: group.driver,
       zone: group.zone || '?',
       weight: group.weight || 0,
@@ -313,23 +387,25 @@ const consolidateMultiPageBOLs = (processedResults) => {
             const extracted = JSON.parse(jsonMatch[0]);
 
             // Store raw extracted data with all fields
-            processedResults.push({
-              pro: extracted.pro,
-              driver: driverName.trim(), // Use the user-provided driver name
-              zone: extracted.zone || '?',
-              weight: extracted.weight || 0,
-              volumeFt3: extracted.volume || 0,
-              liftgate: extracted.liftgate,
-              inside: extracted.inside,
-              overLength: extracted.overLength,
-              residential: extracted.residential,
-              timeSpecific: extracted.timeSpecific,
-              detention: extracted.detention || 0,
-              palletCount: extracted.palletCount || 0,
-              hasDebrisSection: extracted.hasDebrisSection || false,
-              isLakeshore: extracted.isLakeshore || false,
-              deliveryAddress: extracted.deliveryAddress || '',
-            });
+        processedResults.push({
+  pro: extracted.pro,
+  driver: driverName || 'Helder',
+  zone: extracted.zone,
+  weight: extracted.weight || 0,
+  volumeFt3: extracted.volume || 0,
+  liftgate: extracted.liftgate,
+  inside: extracted.inside,
+  overLength: extracted.overLength,
+  residential: extracted.residential,
+  timeSpecific: extracted.timeSpecific,
+  detention: extracted.detention || 0,
+  palletCount: extracted.palletCount || 0,
+  hasDebrisSection: extracted.hasDebrisSection || false,
+  isLakeshore: extracted.isLakeshore || false,
+  deliveryAddress: extracted.deliveryAddress || '',
+});
+
+console.log('Extracted:', extracted.pro, extracted.deliveryAddress);
 
           } catch (error) {
             failedPages.push({ pageNumber: pageResult.pageNumber, error: error.message, filename: file.name });
@@ -345,6 +421,14 @@ const consolidateMultiPageBOLs = (processedResults) => {
 
       // Consolidate multi-page BOLs before setting results
       const consolidatedResults = consolidateMultiPageBOLs(processedResults);
+        // DEBUG: Log all addresses
+        console.log('=== CONSOLIDATION DEBUG ===');
+        processedResults.forEach((r, i) => {
+        console.log(`Entry ${i + 1}: PRO=${r.pro}, Address="${r.deliveryAddress}"`);
+    });
+      console.log('=========================');
+  
+  const grouped = {};
       setResults(consolidatedResults);
 
     } catch (err) {

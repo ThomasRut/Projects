@@ -3,6 +3,9 @@ const cors = require('cors');
 const Anthropic = require('@anthropic-ai/sdk');
 const { PDFDocument } = require('pdf-lib');
 require('dotenv').config();
+// Debug logging - REMOVE AFTER TESTING
+console.log('🔑 API Key status:', process.env.ANTHROPIC_API_KEY ? 'Loaded ✓' : 'Missing ✗');
+console.log('🔑 First 10 chars:', process.env.ANTHROPIC_API_KEY?.substring(0, 10));
 
 const app = express();
 const PORT = 3001;
@@ -137,34 +140,47 @@ async function processPage(pageBase64, pageNumber) {
 10. TIME SPECIFIC - String or blank ""
     - **CRITICAL**: Look for "Req Del From:" and "To:" fields showing the delivery time window
     - **If NO time window is specified** → "" (empty string)
-    - **If time window EXISTS, calculate the window type based on the times:**
-      
-      **AM Special**: If the END time (the "To:" time) is BEFORE 12:00 PM (noon)
-        - Examples: 
-          - "08:00 EST To: 11:00 EST" → AM Special (ends before noon)
-          - "09:00 EST To: 11:59 EST" → AM Special (ends before noon)
-          - "Dec 16 25 - 09:00 EST To: Dec 16 25 - 12:30 EST" → NOT AM Special (ends after noon)
-      
-      **15 Minutes**: If the time window is 15 minutes or less
-        - Examples:
-          - "10:00 EST To: 10:15 EST" → 15 Minutes
-          - "14:30 EST To: 14:45 EST" → 15 Minutes
-      
-      **2 Hours**: If the time window is present and doesn't match AM Special or 15 Minutes
-        - Examples:
-          - "09:00 EST To: 11:00 EST" → 2 Hours
-          - "13:00 EST To: 15:00 EST" → 2 Hours
-          - "Dec 16 25 - 09:00 EST To: Dec 16 25 - 12:30 EST" → 2 Hours
-      
-    - **Logic Priority:**
-      1. Check if "Req Del From:" and "To:" fields exist → If NO, return ""
-      2. If window is 15 minutes or less → "15 Minutes"
-      3. If END time is before 12:00 PM → "AM Special"
-      4. If time window specified but doesn't match above → "2 Hours"
-      5. If no time window found → "" (empty string)
     
-    - **CRITICAL**: Only look at the "Req Del From:" section. If these fields don't exist or are blank, return empty string
-    - **IGNORE** handwritten "TS" or "T.S" markings
+    - **BUSINESS RULES (MUST FOLLOW THIS EXACT PRIORITY):**
+    
+    **STEP 1 - Check for AM Special:**
+    - **If the END time ("To:") is at or before 12:00 PM (noon)** → "AM Special"
+    - 12:00 PM = AM Special ✓
+    - 12:01 PM = NOT AM Special ✗
+    - Examples:
+      - "08:00 EST To: 11:00 EST" → "AM Special" (ends before noon)
+      - "08:00 EST To: 12:00 EST" → "AM Special" (ends at noon) ✓
+      - "Dec 19 25 - 08:00 EST To: Dec 19 25 - 12:00 EST" → "AM Special" (ends at noon) ✓
+      - "10:00 EST To: 12:30 EST" → NOT AM Special (ends after noon)
+    
+    **STEP 2 - If NOT AM Special, check duration:**
+    - Calculate: END time minus START time
+    - **If duration is 15 minutes or less** → "15 Minutes"
+    - **If duration is EXACTLY 2 hours (120 minutes)** → "2 Hours"
+    - **If duration is ANYTHING ELSE (not 15 min, not 2 hours)** → "" (empty string)
+    
+    - **CRITICAL EXAMPLES:**
+      - "Dec 19 25 - 08:00 EST To: Dec 19 25 - 12:00 EST" → "AM Special" (ends at noon)
+      - "14:00 To: 14:15" → "15 Minutes" (15 min window)
+      - "13:00 To: 15:00" → "2 Hours" (exactly 2 hour window)
+      - "13:00 To: 16:00" → "" (3 hour window, not valid)
+      - "14:00 To: 15:30" → "" (1.5 hour window, not valid)
+      - "09:00 To: 12:00" → "AM Special" (ends at noon, ignore duration)
+      - "11:45 To: 12:00" → "AM Special" (ends at noon, even though only 15 min)
+    
+    - **IGNORE:**
+      - Handwritten "TS" or "T.S" markings
+      - Any other annotations
+      - Only use the "Req Del From:" and "To:" fields
+    
+    - **If "Req Del From:" fields are blank or don't exist** → "" (empty string)
+    
+    - **CRITICAL**: When checking if time is "at or before 12:00 PM", remember:
+      - 12:00 PM (noon) = AM Special ✓
+      - 12:00 (in 24-hour format) = AM Special ✓
+      - Any time from 00:00 to 12:00 = AM Special ✓
+      - 12:01 PM or later = NOT AM Special ✗
+    
     - Return exactly one of: "AM Special", "2 Hours", "15 Minutes", or "" (empty string)
 
 11. DETENTION - Number (minutes) or 0
