@@ -1,35 +1,36 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { useState } from 'react';
+import FileUpload from './components/FileUpload';
+import TestGenerator from './components/TestGenerator';
+import './App.css';
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [uploadStatus, setUploadStatus] = useState(null);
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+    <div className="App">
+      <header>
+        <h1>AI Test Case Generator</h1>
+        <p>Upload your codebase and generate comprehensive tests</p>
+      </header>
+
+      <main>
+        <section className="upload-section">
+          <h2>Step 1: Upload Code</h2>
+          <FileUpload onUploadComplete={setUploadStatus} />
+          {uploadStatus && (
+            <div className="status-message">
+              ✓ {uploadStatus.filesProcessed} files processed, {uploadStatus.chunksCreated} code chunks indexed
+            </div>
+          )}
+        </section>
+
+        <section className="generate-section">
+          <h2>Step 2: Generate Tests</h2>
+          <TestGenerator />
+        </section>
+      </main>
+    </div>
+  );
 }
 
-export default App
+export default App;
