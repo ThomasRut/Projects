@@ -1,2 +1,5 @@
-﻿test-case-generator/backend/node_modules
-*.env
+﻿# OS files only - applies to all projects
+.DS_Store
+Thumbs.db
+test-case-generator/backend/node_modules
+test-case-generator/frontend/node_modules
